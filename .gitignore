@@ -1,0 +1,7 @@
+bin/
+obj/
+logs/
+.vs/
+*.user
+# local DB password / dev-only settings
+appsettings.Development.json

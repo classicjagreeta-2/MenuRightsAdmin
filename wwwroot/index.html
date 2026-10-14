@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Menu &amp; Rights Admin</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <!-- Login -->
+  <section id="loginView" class="login hidden">
+    <form id="loginForm" class="card login-card">
+      <h1>Menu &amp; Rights Admin</h1>
+      <p class="muted">Sign in with your ERP user. Only admin users can continue.</p>
+      <label>User name <input id="lgUser" autocomplete="username" required></label>
+      <label>Password <input id="lgPass" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">Sign in</button>
+      <p id="lgError" class="error"></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <section id="appView" class="hidden">
+    <header class="topbar">
+      <strong>Menu &amp; Rights Admin</strong>
+      <label class="module-pick">Module
+        <select id="moduleSel"></select>
+      </label>
+      <nav class="tabs">
+        <button data-tab="menu" class="tab active">Menus</button>
+        <button data-tab="rights" class="tab">User permissions</button>
+      </nav>
+      <span class="spacer"></span>
+      <span id="whoami" class="muted"></span>
+      <button id="logoutBtn">Sign out</button>
+    </header>
+
+    <!-- Menus tab -->
+    <main id="tab-menu" class="tabpane">
+      <div class="split">
+        <div class="card grow">
+          <div class="card-head">
+            <h2>Menu tree</h2>
+            <input id="menuFilter" placeholder="Filter by name / ORDERCODE / controller">
+            <button class="primary" id="addTopBtn">+ Top-level item</button>
+          </div>
+          <table class="grid" id="menuGrid">
+            <thead><tr>
+              <th>Name</th><th>ORDERCODE</th><th>ID / Index</th><th>Controller / Action</th><th>Active</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <aside class="card side hidden" id="editPanel">
+          <div class="card-head">
+            <h2 id="editTitle">New menu item</h2>
+            <button id="editClose" title="Close">✕</button>
+          </div>
+          <form id="editForm">
+            <p class="muted" id="editParent"></p>
+            <label>Menu name <input id="fName" maxlength="100" required></label>
+
+            <fieldset class="row" id="fKindRow">
+              <label class="inline"><input type="radio" name="fKind" value="screen" checked> Screen</label>
+              <label class="inline"><input type="radio" name="fKind" value="heading"> Heading (folder)</label>
+            </fieldset>
+
+            <div id="fScreenBox" class="row2">
+              <label>Controller <input id="fController" placeholder="e.g. SectionMaster (no 'Controller')"></label>
+              <label>Action <input id="fAction" value="Index"></label>
+            </div>
+
+            <div id="fCodeBox" class="row2">
+              <label>ORDERCODE <input id="fOrderCode" maxlength="9" placeholder="02510000T"></label>
+              <label>Menu ID <input id="fId" maxlength="11" placeholder="e.g. NIRIK" title="Items under one parent share this ID (VBMENU ID / rights MNUID); the index tells them apart"></label>
+            </div>
+            <p class="muted small" id="fHint"></p>
+
+            <label class="inline hidden" id="fActiveRow"><input type="checkbox" id="fActive"> Active (visible in the menu)</label>
+
+            <div id="fGrantBox">
+              <h3>Give access to</h3>
+              <p class="muted small">Selected users get full rights (AEDV) on a screen, plus access to the headings above it.</p>
+              <div id="fGrantList" class="checklist"></div>
+            </div>
+
+            <div class="actions">
+              <button type="button" id="editCancel">Cancel</button>
+              <button class="primary" type="submit" id="editSave">Save</button>
+            </div>
+            <p id="editError" class="error"></p>
+          </form>
+        </aside>
+      </div>
+    </main>
+
+    <!-- Rights tab -->
+    <main id="tab-rights" class="tabpane hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>User permissions</h2>
+          <label>User / schema <select id="userSel"></select></label>
+          <input id="rightsFilter" placeholder="Filter">
+          <span class="spacer"></span>
+          <label title="Set Add / Edit / Delete days on every granted screen">Days for all
+            <input type="number" id="allDays" min="0" max="9999" style="width:80px"></label>
+          <button id="allDaysBtn">Apply</button>
+          <button id="grantAllBtn">Grant all</button>
+          <button id="revokeAllBtn">Revoke all</button>
+          <button id="rightsReload">Reload</button>
+          <button class="primary" id="rightsSave">Save changes</button>
+        </div>
+        <p class="muted small pad">
+          <b>Access</b> ticked = allowed (item shows in the user's menu); unticked = denied (the rights row is removed).
+          <b>A</b>dd, <b>E</b>dit, <b>D</b>elete, <b>V</b>iew switch the screen's toolbar buttons.
+          <b>Add / Edit / Delete days</b> (ADAY / EDAY / DDAY) = how many days back the user may add, edit or delete.
+          Headings above a granted screen are granted automatically on save.
+        </p>
+        <table class="grid" id="rightsGrid">
+          <thead><tr>
+            <th>Menu</th><th>ORDERCODE</th><th>Access</th><th>A</th><th>E</th><th>D</th><th>V</th>
+            <th title="ADAY">Add days</th><th title="EDAY">Edit days</th><th title="DDAY">Delete days</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <p id="rightsMsg" class="muted pad"></p>
+      </div>
+    </main>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
