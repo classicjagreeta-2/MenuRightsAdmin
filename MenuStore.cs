@@ -137,22 +137,22 @@ public sealed partial class MenuStore(IConfiguration config)
         return list;
     }
 
-    // Next ORDERCODE / ID / INDEX_ORA for a new child of parentOrderCode (null = top level).
+    // Next ORDERCODE / ID / INDEX_ORA for a new child of the parent with key ID!INDEX_ORA (null = top level).
     // ORDERCODE convention: 8 digits + letter = 4 levels x 2 digits, unused levels '00'.
-    public async Task<Suggestion> SuggestAsync(int moduleId, string? parentOrderCode)
+    public async Task<Suggestion> SuggestAsync(int moduleId, string? parentKey)
     {
         await using var conn = await OpenAsync();
         var m = await ModuleAsync(conn, moduleId);
         var nodes = await MenuNodesAsync(conn, m);
-        return Suggest(m, nodes, parentOrderCode);
+        return Suggest(m, nodes, parentKey);
     }
 
-    private static Suggestion Suggest(ModuleInfo m, List<MenuNode> nodes, string? parentOrderCode)
+    private static Suggestion Suggest(ModuleInfo m, List<MenuNode> nodes, string? parentKey)
     {
         MenuNode? parent = null;
-        if (!string.IsNullOrWhiteSpace(parentOrderCode))
-            parent = nodes.FirstOrDefault(n => n.OrderCode == parentOrderCode)
-                     ?? throw new UserError($"Parent {parentOrderCode} not found.");
+        if (!string.IsNullOrWhiteSpace(parentKey))
+            parent = nodes.FirstOrDefault(n => n.Key == parentKey)
+                     ?? throw new UserError($"Parent {parentKey} not found.");
         string pid = parent?.Key ?? m.Root;
 
         var siblings = nodes.Where(n => n.Pid == pid).ToList();
@@ -209,7 +209,7 @@ public sealed partial class MenuStore(IConfiguration config)
         if (await ExistsAsync(conn, tx, $"SELECT COUNT(*) FROM {m.MenuTable} WHERE ORDERCODE = :oc", ("oc", orderCode)))
             throw new UserError($"ORDERCODE {orderCode} is already used in {m.MenuTable}.");
 
-        var sug = Suggest(m, nodes, req.ParentOrderCode);
+        var sug = Suggest(m, nodes, req.ParentKey);
         string id = string.IsNullOrWhiteSpace(req.Id) ? sug.Id ?? "" : req.Id.Trim().ToUpperInvariant();
         if (!MenuIdRx().IsMatch(id))
             throw new UserError("Menu ID is required when the parent has no children yet (letters/digits/_ , max 11).");
@@ -245,27 +245,52 @@ public sealed partial class MenuStore(IConfiguration config)
         return target;
     }
 
-    public async Task UpdateMenuAsync(int moduleId, string orderCode, MenuUpdate req, string adminUser)
+    // The item is picked by its ID!INDEX_ORA key: ORDERCODE is not unique in every menu table
+    // (e.g. two FIN rows share 09190000F).
+    public async Task UpdateMenuAsync(int moduleId, MenuUpdate req, string adminUser)
     {
         await using var conn = await OpenAsync();
         await using var tx = (OracleTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted);
         var m = await ModuleAsync(conn, moduleId, tx);
-        var node = (await MenuNodesAsync(conn, m, tx)).FirstOrDefault(n => n.OrderCode == orderCode)
-                   ?? throw new UserError($"Menu {orderCode} not found.");
+        var nodes = await MenuNodesAsync(conn, m, tx);
+        var node = nodes.FirstOrDefault(n => n.Key == req.Key)
+                   ?? throw new UserError($"Menu item {req.Key} not found.");
+        string orderCode = node.OrderCode;
 
         var changes = new List<string>();
         string name = string.IsNullOrWhiteSpace(req.Name) ? node.Name : req.Name.Trim();
         if (name.Length > 100) throw new UserError("Menu name max 100 characters.");
         bool active = req.Active ?? node.Active;
 
-        await using (var cmd = Cmd(conn, $"UPDATE {m.MenuTable} SET NAME = :n, PERDOTNETMENU = :a WHERE ORDERCODE = :oc AND MODULE = :code", tx))
+        // An item under a switched-off heading stays off: switch the heading on first.
+        if (active && !node.Active)
+        {
+            var byKey = nodes.ToDictionary(n => n.Key);
+            var pid = node.Pid;
+            for (int guard = 0; byKey.TryGetValue(pid, out var parent) && guard < 20; guard++, pid = parent.Pid)
+                if (!parent.Active)
+                    throw new UserError($"“{parent.Name}” ({parent.OrderCode}) above this item is switched off - switch it on first.");
+        }
+
+        // Switching an item on or off does the same to everything under it.
+        if (active != node.Active)
+        {
+            var under = Descendants(nodes, node).Where(d => d.Active != active).ToList();
+            foreach (var d in under)
+                await SetActiveAsync(conn, tx, m, nodes, d, active);
+            if (under.Count > 0)
+                changes.Add($"{(active ? "activated" : "deactivated")} {under.Count} item(s) under it: {string.Join(", ", under.Select(d => d.OrderCode))}");
+        }
+
+        await using (var cmd = Cmd(conn, $"UPDATE {m.MenuTable} SET NAME = :n WHERE ID = :id AND INDEX_ORA = :ix AND MODULE = :code", tx))
         {
             cmd.Parameters.Add("n", name);
-            cmd.Parameters.Add("a", active ? "Y" : "N");
-            cmd.Parameters.Add("oc", orderCode);
+            cmd.Parameters.Add("id", node.Id);
+            cmd.Parameters.Add("ix", node.Index);
             cmd.Parameters.Add("code", m.Code);
             await cmd.ExecuteNonQueryAsync();
         }
+        if (active != node.Active) await SetActiveAsync(conn, tx, m, nodes, node, active);
         if (name != node.Name) changes.Add($"name '{node.Name}' -> '{name}'");
         if (active != node.Active) changes.Add(active ? "activated" : "deactivated");
 
@@ -275,12 +300,51 @@ public sealed partial class MenuStore(IConfiguration config)
         {
             if (!ControllerRx().IsMatch(controller) || !ControllerRx().IsMatch(action))
                 throw new UserError("Controller/Action must be plain names.");
-            await UpsertDoneAsync(conn, tx, m, orderCode, name, controller, action, active);
+            // On/off is handled by SetActiveAsync; here only a new/changed screen link is written.
+            if (controller != node.Controller || action != node.Action || name != node.Name)
+            {
+                bool linkOn = active || nodes.Any(n => n.OrderCode == orderCode && n.Key != node.Key && n.Active);
+                await UpsertDoneAsync(conn, tx, m, orderCode, name, controller, action, linkOn);
+            }
             if (controller != node.Controller || action != node.Action) changes.Add($"-> {controller}/{action}");
         }
 
         await tx.CommitAsync();
-        Audit.Write(adminUser, $"UPDATE menu {m.Code} {orderCode}: {(changes.Count == 0 ? "no change" : string.Join("; ", changes))}");
+        Audit.Write(adminUser, $"UPDATE menu {m.Code} {orderCode} ({node.Key}): {(changes.Count == 0 ? "no change" : string.Join("; ", changes))}");
+    }
+
+    // Every node below `node` (PID chain), any depth.
+    private static List<MenuNode> Descendants(List<MenuNode> nodes, MenuNode node)
+    {
+        var kids = nodes.ToLookup(n => n.Pid);
+        var result = new List<MenuNode>();
+        var seen = new HashSet<string> { node.Key };
+        var queue = new Queue<MenuNode>([node]);
+        while (queue.Count > 0)
+            foreach (var c in kids[queue.Dequeue().Key])
+                if (seen.Add(c.Key)) { result.Add(c); queue.Enqueue(c); }
+        return result;
+    }
+
+    // Visible flag of one item: menu row (the ERP menu shows PERDOTNETMENU = 'Y' only) and its screen link.
+    private static async Task SetActiveAsync(OracleConnection conn, OracleTransaction tx, ModuleInfo m,
+        List<MenuNode> nodes, MenuNode node, bool active)
+    {
+        await using (var cmd = Cmd(conn, $"UPDATE {m.MenuTable} SET PERDOTNETMENU = :a WHERE ID = :id AND INDEX_ORA = :ix AND MODULE = :code", tx))
+        {
+            cmd.Parameters.Add("a", active ? "Y" : "N");
+            cmd.Parameters.Add("id", node.Id);
+            cmd.Parameters.Add("ix", node.Index);
+            cmd.Parameters.Add("code", m.Code);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        // VBMENU_DONE is per ORDERCODE: keep the link on while another visible item still uses the same code.
+        if (!active && nodes.Any(n => n.OrderCode == node.OrderCode && n.Key != node.Key && n.Active)) return;
+        await using var done = Cmd(conn, "UPDATE VBMENU_DONE SET ISACTIVE = :a WHERE MODULECODE = :code AND MENUCODE = :oc", tx);
+        done.Parameters.Add("a", active ? 1 : 0);
+        done.Parameters.Add("code", m.Code);
+        done.Parameters.Add("oc", node.OrderCode);
+        await done.ExecuteNonQueryAsync();
     }
 
     private static async Task UpsertDoneAsync(OracleConnection conn, OracleTransaction tx, ModuleInfo m,
@@ -557,9 +621,9 @@ public record RightsView(List<MenuNode> Nodes, List<RightRow> Rights);
 public record SaveResult(int Added, int Changed, int Removed);
 
 public record GrantTarget(string User, string Schema);
-public record NewMenuItem(string? Name, string? ParentOrderCode, string? OrderCode, string? Id,
+public record NewMenuItem(string? Name, string? ParentKey, string? OrderCode, string? Id,
                           bool IsScreen, string? Controller, string? Action, List<GrantTarget>? GrantTo);
-public record MenuUpdate(string? Name, bool? Active, string? Controller, string? Action);
+public record MenuUpdate(string Key, string? Name, bool? Active, string? Controller, string? Action);
 // ADAY / EDAY / DDAY: how many days back the user may add / edit / delete on the screen.
 public record RightItem(string Id, string Index, bool Granted, string? Aedv, int? Days, int? Aday = null, int? Eday = null, int? Dday = null);
 

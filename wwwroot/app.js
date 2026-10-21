@@ -88,7 +88,17 @@ async function start() {
   $('#appView').classList.remove('hidden');
   $('#whoami').textContent = state.me.user;
 
-  state.modules = await call('GET', '/api/modules');
+  try {
+    state.modules = await call('GET', '/api/modules');
+  } catch (err) {
+    showProblem('Could not load the module list from the database.', err.message);
+    return;
+  }
+  if (!state.modules.length) {
+    showProblem('The MODULE table returned no modules with a MENU_TABLE and USRACS_TABLE.',
+      'Check that ConnectionStrings:ClassicNew in appsettings.json logs in as the ClassicNew schema.');
+    return;
+  }
   const sel = $('#moduleSel');
   // Ready modules first; a module whose menu table does not exist is listed but cannot be picked.
   const ordered = [...state.modules.filter((m) => m.ready), ...state.modules.filter((m) => !m.ready)];
@@ -100,6 +110,12 @@ async function start() {
   if (saved && state.modules.some((m) => String(m.id) === saved && m.ready)) sel.value = saved;
   else if (ordered.length && ordered[0].ready) sel.value = String(ordered[0].id);
   await loadModule();
+}
+
+// A setup problem stays on screen (a toast disappears before anyone can read it).
+function showProblem(title, detail) {
+  $('#menuGrid tbody').innerHTML =
+    `<tr><td colspan="6"><p class="error"><b>${esc(title)}</b></p><p class="code">${esc(detail)}</p></td></tr>`;
 }
 
 $('#moduleSel').addEventListener('change', () => {
@@ -122,7 +138,7 @@ async function loadModule() {
     renderUserSelect();
     await loadRights();
   } catch (err) {
-    toast(err.message, true);
+    showProblem('Could not load this module.', err.message);
   }
 }
 
@@ -140,15 +156,16 @@ function buildTree(nodes, root) {
   for (const list of kids.values()) list.sort((a, b) => a.orderCode.localeCompare(b.orderCode));
   const out = [];
   const seen = new Set();
-  const walk = (key, depth) => {
+  // offAbove: a heading above this item is switched off, so the item is hidden too.
+  const walk = (key, depth, offAbove) => {
     for (const n of kids.get(key) || []) {
       if (seen.has(n.key)) continue;
       seen.add(n.key);
-      out.push({ ...n, depth, hasKids: kids.has(n.key) });
-      walk(n.key, depth + 1);
+      out.push({ ...n, depth, hasKids: kids.has(n.key), offAbove });
+      walk(n.key, depth + 1, offAbove || !n.active);
     }
   };
-  walk('__root', 0);
+  walk('__root', 0, false);
   return out;
 }
 
@@ -159,7 +176,7 @@ function renderMenu() {
   const rows = state.tree.filter((n) => !f ||
     [n.name, n.orderCode, n.controller, n.id].some((v) => (v || '').toLowerCase().includes(f)));
   $('#menuGrid tbody').innerHTML = rows.map((n) => `
-    <tr class="${n.active ? '' : 'inactive'}" data-key="${esc(n.key)}">
+    <tr class="${n.active && !n.offAbove ? '' : 'inactive'}" data-key="${esc(n.key)}">
       <td class="name" style="padding-left:${10 + n.depth * 20}px">
         ${n.hasKids ? '▸ ' : ''}<span class="${isScreen(n) ? '' : 'tree-heading'}${n.depth === 0 ? ' tree-top' : ''}">${esc(n.name)}</span>
         ${isScreen(n) ? '' : '<span class="badge">heading</span>'}
@@ -167,7 +184,8 @@ function renderMenu() {
       <td class="code">${esc(n.orderCode)}</td>
       <td class="code">${esc(n.id)} / ${esc(n.index)}</td>
       <td>${n.controller ? `${esc(n.controller)}/${esc(n.action)}` : '<span class="muted">—</span>'}</td>
-      <td><label class="switch" title="Show / hide in the menu"><input type="checkbox" data-act="toggle" ${n.active ? 'checked' : ''}><span></span></label></td>
+      <td><label class="switch" title="${n.offAbove ? 'A heading above is switched off - switch it on first' : 'Show / hide in the menu (also everything under it)'}">
+        <input type="checkbox" data-act="toggle" ${n.active ? 'checked' : ''} ${n.offAbove ? 'disabled' : ''}><span></span></label></td>
       <td>
         <button class="link" data-act="add">+ Child</button>
         <button class="link" data-act="edit">Edit</button>
@@ -187,9 +205,18 @@ $('#menuGrid').addEventListener('click', async (e) => {
   if (act === 'edit') openEdit(node);
   if (act === 'toggle') {
     const active = e.target.checked;
+    // Items under this one follow it.
+    const at = state.tree.indexOf(node);
+    let end = at + 1;
+    while (end < state.tree.length && state.tree[end].depth > node.depth) end++;
+    const affected = state.tree.slice(at + 1, end).filter((d) => d.active !== active).length;
+    if (affected && !confirm(`${active ? 'Switch on' : 'Switch off'} “${node.name}” and the ${affected} item(s) under it?`)) {
+      e.target.checked = !active;
+      return;
+    }
     try {
-      await call('PUT', `/api/modules/${state.moduleId}/menu/${encodeURIComponent(node.orderCode)}`, { active });
-      toast(`${node.name} ${active ? 'activated' : 'deactivated'}.`);
+      await call('POST', `/api/modules/${state.moduleId}/menu/update`, { key: node.key, active });
+      toast(`${node.name}${affected ? ` and ${affected} item(s) under it` : ''} ${active ? 'activated' : 'deactivated'}.`);
       await reloadMenu();
     } catch (err) {
       e.target.checked = !active;
@@ -246,7 +273,7 @@ async function openNew(parent) {
   $('#editPanel').classList.remove('hidden');
   $('#fName').focus();
   try {
-    const s = await call('GET', `/api/modules/${state.moduleId}/suggest?parent=${encodeURIComponent(parent ? parent.orderCode : '')}`);
+    const s = await call('GET', `/api/modules/${state.moduleId}/suggest?parent=${encodeURIComponent(parent ? parent.key : '')}`);
     state.editing.siblingId = s.id;
     state.editing.idTouched = false;
     $('#fOrderCode').value = s.orderCode || '';
@@ -300,6 +327,7 @@ function openEdit(node) {
   $('#fGrantBox').classList.add('hidden');
   $('#fActiveRow').classList.remove('hidden');
   $('#fActive').checked = node.active;
+  $('#fActive').disabled = !!node.offAbove;   // a heading above is off
   $('#fScreenBox').classList.toggle('hidden', !isScreen(node));
   $('#fController').value = node.controller || '';
   $('#fAction').value = node.action || 'Index';
@@ -323,7 +351,7 @@ $('#editForm').addEventListener('submit', async (e) => {
         .map((u) => ({ user: u.user, schema: u.schema }));
       const created = await call('POST', `/api/modules/${state.moduleId}/menu`, {
         name: $('#fName').value,
-        parentOrderCode: ed.parent ? ed.parent.orderCode : null,
+        parentKey: ed.parent ? ed.parent.key : null,
         orderCode: $('#fOrderCode').value,
         id: $('#fId').value,
         isScreen: screen,
@@ -333,7 +361,8 @@ $('#editForm').addEventListener('submit', async (e) => {
       });
       toast(`Created ${created.name} (${created.orderCode}).`);
     } else {
-      await call('PUT', `/api/modules/${state.moduleId}/menu/${encodeURIComponent(ed.node.orderCode)}`, {
+      await call('POST', `/api/modules/${state.moduleId}/menu/update`, {
+        key: ed.node.key,
         name: $('#fName').value,
         active: $('#fActive').checked,
         controller: isScreen(ed.node) ? $('#fController').value : null,
@@ -407,7 +436,7 @@ function renderRights() {
       ? `<input type="checkbox" data-aedv="${c}" ${r.aedv.includes(c) ? 'checked' : ''} ${r.granted ? '' : 'disabled'}>`
       : '';
     return `
-      <tr data-key="${esc(n.key)}" class="${isChanged(n.key) ? 'changed' : ''} ${n.active ? '' : 'inactive'}">
+      <tr data-key="${esc(n.key)}" class="${isChanged(n.key) ? 'changed' : ''} ${n.active && !n.offAbove ? '' : 'inactive'}">
         <td class="name" style="padding-left:${10 + n.depth * 20}px">
           <span class="${screen ? '' : 'tree-heading'}${n.depth === 0 ? ' tree-top' : ''}">${esc(n.name)}</span>
         </td>
@@ -480,7 +509,7 @@ $('#rightsSave').addEventListener('click', async () => {
   });
   $('#rightsSave').disabled = true;
   try {
-    const res = await call('PUT', `/api/modules/${state.moduleId}/rights`, { user: user.user, schema: user.schema, items });
+    const res = await call('POST', `/api/modules/${state.moduleId}/rights/save`, { user: user.user, schema: user.schema, items });
     toast(`Saved: ${res.added} added, ${res.changed} changed, ${res.removed} removed.`);
     await loadRights();
   } catch (err) {

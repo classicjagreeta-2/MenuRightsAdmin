@@ -127,14 +127,15 @@ api.MapGet("/modules/{id:int}/menu", (int id, MenuStore s) => s.GetMenuAsync(id)
 api.MapGet("/modules/{id:int}/suggest", (int id, string? parent, MenuStore s) => s.SuggestAsync(id, parent));
 api.MapPost("/modules/{id:int}/menu", (int id, NewMenuItem req, MenuStore s, ClaimsPrincipal u, IConfiguration cfg) =>
     s.CreateMenuAsync(id, req, u.Identity!.Name!, cfg.GetValue("Defaults:Days", 365)));
-api.MapPut("/modules/{id:int}/menu/{orderCode}", async (int id, string orderCode, MenuUpdate req, MenuStore s, ClaimsPrincipal u) =>
+// Saves are POST only: IIS (WebDAV) answers PUT / DELETE with 405 before they reach the app.
+api.MapPost("/modules/{id:int}/menu/update", async (int id, MenuUpdate req, MenuStore s, ClaimsPrincipal u) =>
 {
-    await s.UpdateMenuAsync(id, orderCode, req, u.Identity!.Name!);
-    return Results.Ok();
+    await s.UpdateMenuAsync(id, req, u.Identity!.Name!);
+    return Results.Ok(new { ok = true });
 });
 api.MapGet("/modules/{id:int}/users", (int id, MenuStore s) => s.GetUsersAsync(id));
 api.MapGet("/modules/{id:int}/rights", (int id, string user, string schema, MenuStore s) => s.GetRightsAsync(id, user, schema));
-api.MapPut("/modules/{id:int}/rights", (int id, RightsSave req, MenuStore s, ClaimsPrincipal u, IConfiguration cfg) =>
+api.MapPost("/modules/{id:int}/rights/save", (int id, RightsSave req, MenuStore s, ClaimsPrincipal u, IConfiguration cfg) =>
     s.SaveRightsAsync(id, req, u.Identity!.Name!, cfg.GetValue("Defaults:Days", 365)));
 
 app.Run();
